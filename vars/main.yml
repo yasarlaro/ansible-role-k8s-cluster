@@ -1,0 +1,6 @@
+---
+# vars file for ansible-role-k8s-cluster
+admin_user: vagrant
+pod_subnet: "172.16.0.0"
+pod_cidr: "16"
+calico_version: "v3.14"

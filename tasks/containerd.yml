@@ -1,0 +1,103 @@
+---
+- name: Copy containerd kernel module configuration
+  copy:
+    src: containerd.conf
+    dest: /etc/modules-load.d/containerd.conf
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Load kernel modules
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Setup required persistent sysctl params
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+    reload: yes
+  loop:
+    - { name: net.bridge.bridge-nf-call-iptables, value: 1}
+    - { name: net.ipv4.ip_forward, value: 1}
+    - { name: net.bridge.bridge-nf-call-ip6tables, value: 1}
+
+- name: Install required packages
+  package:
+    name: "{{ containerd_packages }}"
+    state: present
+
+- name: Create docker-ce package repository
+  get_url:
+    url: "https://download.docker.com/linux/centos/docker-ce.repo"
+    dest: /etc/yum.repos.d/docker-ce.repo
+    owner: root
+    group: root
+    mode: '0644'
+  when: ansible_distribution == "CentOS"
+
+- name: Upgrade system
+  yum:
+    name: '*'
+    state: latest
+  tags: ['skip_ansible_lint']
+
+- name: Check if reboot is required
+  shell: /usr/bin/needs-restarting -r
+  tags: ['skip_ansible_lint']
+  ignore_errors: "yes"
+  register: needs_restarting
+
+- name: Reboot server if needed
+  reboot:
+    msg: "Reboot initiated by Ansible"
+    connect_timeout: 5
+    reboot_timeout: 600
+    pre_reboot_delay: 0
+    post_reboot_delay: 30
+    test_command: whoami
+  when: needs_restarting.rc == 1
+
+- name: Install containerd.io
+  package:
+    name: containerd.io
+    state: present
+
+- name: Create /etc/containerd
+  file:
+    path: /etc/containerd
+    state: directory
+    mode: '0755'
+
+- name: Copy containerd configuration
+  shell: "containerd config default > /tmp/config.toml"
+  args:
+    warn: no
+  tags: ['skip_ansible_lint']
+  notify: clean up
+
+- name: Override containerd configuration if changed
+  copy:
+    src: /tmp/config.toml
+    dest: /etc/containerd/config.toml
+    remote_src: yes
+    owner: root
+    group: root
+    mode: '0644'
+  register: containerd_config
+
+- name: Enable containerd
+  service:
+    name: containerd
+    enabled: true
+
+- name: Restart containerd
+  service:
+    name: containerd
+    state: restarted
+  when: containerd_config.changed

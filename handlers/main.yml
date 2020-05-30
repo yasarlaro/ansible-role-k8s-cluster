@@ -1,0 +1,15 @@
+---
+# handlers file for ansible-role-k8s-cluster
+- name: restart containerd
+  service:
+    name: containerd
+    state: restarted
+  become: true
+
+- name: clean up
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/config.toml
+  become: true

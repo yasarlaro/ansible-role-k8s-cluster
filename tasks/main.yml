@@ -1,0 +1,164 @@
+---
+# tasks file for ansible-role-k8s-cluster
+- name: Include OS specific vars
+  include_vars: "{{ ansible_distribution }}.yml"
+
+- name: Run prelim tasks
+  include: prelim.yml
+  become: true
+
+- name: Install containerd on all nodes
+  include: containerd.yml
+  become: true
+
+- name: Run privilege tasks
+  block:
+    - name: Create kubernetes yum repository
+      copy:
+        src: kubernetes.repo
+        dest: /etc/yum.repos.d/kubernetes.repo
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install Kubernetes packages
+      yum:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        update_cache: yes
+        disable_excludes: kubernetes
+
+    - name: Configure node ip on primary master
+      lineinfile:
+        path: /etc/default/kubelet
+        line: KUBELET_EXTRA_ARGS=--node-ip={{ ansible_default_ipv4.address }}
+        create: true
+      when: my_role == 'primary-master'
+
+    - name: Enable kubelet service
+      service:
+        name: kubelet
+        daemon_reload: yes
+        enabled: yes
+
+    - name: Check if cluster is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_init
+
+    - name: Initialize Kubernetes Cluster
+      command: >
+        kubeadm init
+        --apiserver-advertise-address={{ ansible_default_ipv4.address }}
+        --apiserver-cert-extra-sans={{ ansible_default_ipv4.address }}
+        --node-name {{ ansible_hostname }}
+        --pod-network-cidr={{ pod_subnet }}/{{ pod_cidr }}
+        --control-plane-endpoint {{ ansible_default_ipv4.address }}:6443
+        --upload-certs
+      when:
+        - not kubeadm_init.stat.exists
+        - my_role == 'primary-master'
+
+    - name: Get the kubeadm join command for the nodes.
+      command: kubeadm token create --print-join-command
+      changed_when: false
+      when: my_role == 'primary-master'
+      tags: ['skip_ansible_lint']
+      register: kubernetes_node_join_command_result
+
+    - name: Set the kubeadm join command globally.
+      set_fact:
+        kubernetes_node_join_command: >
+          {{ kubernetes_node_join_command_result.stdout }}
+      when: kubernetes_node_join_command_result.stdout is defined
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      with_items: "{{ groups['worker'] }}"
+
+    - name: "Setup kubeconfig for {{ admin_user }} user on Primary master"
+      file:
+        path: "/home/{{ admin_user }}/.kube"
+        state: directory
+        recurse: yes
+        owner: "{{ admin_user }}"
+      when: my_role == 'primary-master'
+
+    - name: "Copy kube configuration for {{ admin_user }} user on Primary master"
+      copy:
+        src: /etc/kubernetes/admin.conf
+        remote_src: yes
+        dest: "/home/{{ admin_user }}/.kube/config"
+        mode: 0644
+        owner: "{{ admin_user }}"
+      when: my_role == 'primary-master'
+
+    - name: Deploy Calico
+      become: false
+      command: "kubectl apply -f https://docs.projectcalico.org/{{ calico_version }}/manifests/calico.yaml"
+      when: my_role == 'primary-master'
+
+    - name: Join nodes to Kubernetes cluster
+      shell: >
+        {{ kubernetes_node_join_command }}
+        creates=/etc/kubernetes/kubelet.conf
+      tags: ['skip_ansible_lint']
+      when: my_role == 'worker-node'
+
+    - name: Generate join token for secondary masters
+      command: "kubeadm token create"
+      become: no
+      when: my_role == 'primary-master'
+      tags: ['skip_ansible_lint']
+      register: k8s_token
+
+    - name: Generate Certificate Hash
+      shell: "openssl rand -hex 32"
+      register: k8s_hash
+      tags: ['skip_ansible_lint']
+      when: my_role == 'primary-master'
+
+    - name: Upload Certificates on Primary Master
+      shell:
+        cmd: "kubeadm init phase upload-certs --upload-certs --certificate-key={{ k8s_hash.stdout }}"
+      when: my_role == 'primary-master'
+      tags: ['skip_ansible_lint']
+
+    - name: Set the kubeadm join command for secondary masters
+      set_fact:
+        kubernetes_master_join_command: >
+          {{ kubernetes_node_join_command_result.stdout }}
+          --control-plane --certificate-key {{ k8s_hash.stdout }}
+      when:
+        - kubernetes_node_join_command_result.stdout is defined
+        - k8s_token.stdout is defined
+        - k8s_hash.stdout is defined
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['master'] }}"
+
+    - name: Join other Kubernetes masters to the cluster
+      shell: >
+        {{ kubernetes_master_join_command }}
+      when:
+        - my_role == 'secondary-master'
+        - not kubeadm_init.stat.exists
+
+    - name: "Setup kubeconfig for {{ admin_user }} user on Backup masters"
+      file:
+        path: "/home/{{ admin_user }}/.kube"
+        state: directory
+        recurse: yes
+        owner: "{{ admin_user }}"
+      when: my_role == 'secondary-master'
+
+    - name: "Copy kube configuration for {{ admin_user }} user on Backup masters"
+      copy:
+        src: /etc/kubernetes/admin.conf
+        remote_src: yes
+        dest: "/home/{{ admin_user }}/.kube/config"
+        mode: 0644
+        owner: "{{ admin_user }}"
+      when: my_role == 'secondary-master'
+  become: true

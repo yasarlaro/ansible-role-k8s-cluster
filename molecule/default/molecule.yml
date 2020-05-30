@@ -1,0 +1,43 @@
+---
+dependency:
+  name: galaxy
+driver:
+  name: vagrant
+  provider:
+    name: libvirt
+lint: |
+  yamllint .
+  ansible-lint
+platforms:
+  - name: master1
+    box: centos/7
+    memory: 4096
+    cpus: 2
+    groups:
+      - master
+  - name: master2
+    box: centos/7
+    memory: 4096
+    cpus: 2
+    groups:
+      - master
+  - name: worker1
+    box: centos/7
+    memory: 2048
+    cpus: 2
+    groups:
+      - worker
+  - name: worker2
+    box: centos/7
+    memory: 2048
+    cpus: 2
+    groups:
+      - worker
+provisioner:
+  name: ansible
+  inventory:
+    links:
+      group_vars: ../vars/group_vars/
+      host_vars: ../vars/host_vars/
+verifier:
+  name: ansible
