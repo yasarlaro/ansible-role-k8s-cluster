@@ -3,7 +3,7 @@ galaxy_info:
   author: Onur Yasarlar
   description: Installs Kubernetes cluster on Centos 7
   company: Onur Lab
-  role_name: k8s-cluster
+  role_name: k8s_cluster
 
   license: license MIT
 
